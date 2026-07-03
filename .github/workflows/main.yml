@@ -1,0 +1,36 @@
+name: Build 7-Zip x64
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-x64:
+    name: Windows x64 MSVC
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSVC x64 environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # Alone2 builds 7zz.exe, the standalone console version with all formats.
+      - name: Build 7zz.exe
+        shell: cmd
+        working-directory: CPP\7zip\Bundles\Alone2
+        run: |
+          nmake PLATFORM=x64
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 7zip-7zz-windows-x64
+          path: |
+            CPP/7zip/Bundles/Alone2/x64/7zz.exe
+          if-no-files-found: error
