@@ -1,4 +1,4 @@
-name: Build 7-Zip whole package x64 AVX2
+name: Build 7-Zip Whole Package x64 AVX2
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   build-windows-x64:
-    name: Windows x64 MSVC package AVX2
+    name: Windows x64 MSVC AVX2
     runs-on: windows-2022
 
     steps:
@@ -20,37 +20,31 @@ jobs:
         with:
           arch: x64
 
-      - name: Force maximum optimization and AVX2
+      - name: Patch 7-Zip makefile for maximum optimization and AVX2
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-
-          $buildMak = Join-Path $env:GITHUB_WORKSPACE 'CPP\Build.mak'
-          if (-not (Test-Path $buildMak)) {
+          $buildMak = "CPP\Build.mak"
+          if (!(Test-Path $buildMak)) {
             throw "Cannot find $buildMak"
           }
 
-          $text = Get-Content -LiteralPath $buildMak -Raw
+          $text = Get-Content $buildMak -Raw
 
-          # 7-Zip's Build.mak normally defines:
-          #   CFLAGS_O1 = $(CFLAGS) -O1
-          #   CFLAGS_O2 = $(CFLAGS) -O2
-          # Replace both so every O1/O2 compile path uses the same aggressive x64 AVX2 settings.
-          $maxClFlags = '-O2 -Ob3 -Oi -Ot -Oy -GL -Gy -GF -Gw -arch:AVX2'
-          $text = [regex]::Replace($text, '(?m)^CFLAGS_O1\s*=.*$', 'CFLAGS_O1 = $(CFLAGS) ' + $maxClFlags)
-          $text = [regex]::Replace($text, '(?m)^CFLAGS_O2\s*=.*$', 'CFLAGS_O2 = $(CFLAGS) ' + $maxClFlags)
+          # 7-Zip uses both CFLAGS_O1 and CFLAGS_O2.
+          # Patch both, otherwise files compiled through CFLAGS_O1 would still use -O1.
+          $optFlags = '$(CFLAGS) -O2 -Ob3 -Oi -Ot -Oy -GL -Gy -GF -Gw -arch:AVX2'
+          $text = $text -replace 'CFLAGS_O1\s*=\s*\$\(CFLAGS\)\s+-O1', "CFLAGS_O1 = $optFlags"
+          $text = $text -replace 'CFLAGS_O2\s*=\s*\$\(CFLAGS\)\s+-O2', "CFLAGS_O2 = $optFlags"
 
-          # Enable link-time code generation to match /GL.
-          $text = [regex]::Replace(
-            $text,
-            '(?m)^(LFLAGS\s*=\s*\$\(LFLAGS\)\s+-nologo\s+-OPT:REF\s+-OPT:ICF\s+-INCREMENTAL:NO)\s*$',
-            '$1 -LTCG'
-          )
+          # Add link-time optimization. /OPT:REF and /OPT:ICF are already present
+          # in Build.mak, but keeping them here makes the intended settings explicit.
+          $text += "`r`n# Added by GitHub Actions workflow: maximum optimization + AVX2`r`n"
+          $text += 'LFLAGS = $(LFLAGS) /LTCG /OPT:REF /OPT:ICF' + "`r`n"
 
-          Set-Content -LiteralPath $buildMak -Value $text -NoNewline
+          Set-Content -Path $buildMak -Value $text -NoNewline
 
-          Write-Host 'Effective optimization lines in CPP\Build.mak:'
-          Select-String -LiteralPath $buildMak -Pattern 'CFLAGS_O1|CFLAGS_O2|LFLAGS = \$\(LFLAGS\) -nologo' | ForEach-Object {
+          Write-Host "Effective optimization-related lines:"
+          Select-String -Path $buildMak -Pattern 'CFLAGS_O1|CFLAGS_O2|LFLAGS = \$\(LFLAGS\).*LTCG|arch:AVX2' | ForEach-Object {
             Write-Host $_.Line
           }
 
@@ -60,74 +54,79 @@ jobs:
         run: |
           nmake PLATFORM=x64
 
-      - name: Show produced binaries
+      # Explicitly build the all-formats DLL target. This should normally be included
+      # by the top-level bundle build, but this step guarantees 7z.dll is produced.
+      - name: Build 7z.dll explicitly
+        shell: cmd
+        working-directory: CPP\7zip\Bundles\Format7zF
+        run: |
+          nmake PLATFORM=x64
+
+      - name: Verify expected package outputs
         shell: pwsh
         run: |
-          Get-ChildItem -Path "CPP\7zip" -Recurse -File -Include *.exe,*.dll,*.sfx |
-            Sort-Object FullName |
-            ForEach-Object { $_.FullName }
+          $required = @(
+            "7z.exe",
+            "7z.dll",
+            "7zFM.exe",
+            "7zG.exe",
+            "7zz.exe",
+            "7za.exe"
+          )
+
+          foreach ($name in $required) {
+            $matches = Get-ChildItem -Path "CPP\7zip" -Recurse -File -Filter $name
+            if (-not $matches) {
+              throw "Required output was not built: $name"
+            }
+            Write-Host "Found ${name}:"
+            $matches | ForEach-Object { Write-Host "  $($_.FullName)" }
+          }
 
       - name: Stage package files
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
+          $stage = "artifacts\7zip-windows-x64-avx2"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
 
-          $root = Join-Path $env:GITHUB_WORKSPACE 'CPP\7zip'
-          $dist = Join-Path $env:GITHUB_WORKSPACE 'dist\7zip-windows-x64-avx2'
-          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          $patterns = @("*.exe", "*.dll", "*.sfx")
+          $files = foreach ($pattern in $patterns) {
+            Get-ChildItem -Path "CPP\7zip" -Recurse -File -Filter $pattern
+          }
 
-          # Preserve relative paths so duplicate names from different build targets do not overwrite each other.
-          $files = Get-ChildItem -Path $root -Recurse -File -Include *.exe,*.dll,*.sfx |
-            Sort-Object FullName
+          $files = $files | Sort-Object FullName -Unique
 
           if (-not $files) {
-            throw 'No package binaries were produced.'
+            throw "No package binaries were found."
           }
 
           foreach ($file in $files) {
-            $relative = $file.FullName.Substring($root.Length).TrimStart('\')
-            $target = Join-Path $dist $relative
-            New-Item -ItemType Directory -Force -Path (Split-Path $target -Parent) | Out-Null
-            Copy-Item -LiteralPath $file.FullName -Destination $target -Force
+            Copy-Item -Path $file.FullName -Destination (Join-Path $stage $file.Name) -Force
           }
 
-          # Include license/readme files when present.
-          $docFiles = @(
-            'DOC\readme.txt',
-            'DOC\License.txt',
-            'DOC\copying.txt',
-            'DOC\unRarLicense.txt',
-            'DOC\src-history.txt'
-          )
-
-          foreach ($doc in $docFiles) {
-            $source = Join-Path $env:GITHUB_WORKSPACE $doc
-            if (Test-Path $source) {
-              $target = Join-Path $dist $doc
-              New-Item -ItemType Directory -Force -Path (Split-Path $target -Parent) | Out-Null
-              Copy-Item -LiteralPath $source -Destination $target -Force
-            }
+          Write-Host "Staged files:"
+          Get-ChildItem $stage | Sort-Object Name | ForEach-Object {
+            Write-Host "  $($_.Name)"
           }
 
-      - name: Create package zip
+      - name: Create zip package
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          $dist = Join-Path $env:GITHUB_WORKSPACE 'dist\7zip-windows-x64-avx2'
-          $zip = Join-Path $env:GITHUB_WORKSPACE 'dist\7zip-windows-x64-avx2.zip'
-          if (Test-Path $zip) { Remove-Item $zip -Force }
-          Compress-Archive -Path "$dist\*" -DestinationPath $zip -Force
+          Compress-Archive `
+            -Path "artifacts\7zip-windows-x64-avx2\*" `
+            -DestinationPath "artifacts\7zip-windows-x64-avx2.zip" `
+            -Force
 
-      - name: Upload package folder
+      - name: Upload package folder artifact
         uses: actions/upload-artifact@v4
         with:
           name: 7zip-windows-x64-avx2-package-folder
-          path: dist/7zip-windows-x64-avx2/
+          path: artifacts/7zip-windows-x64-avx2/
           if-no-files-found: error
 
-      - name: Upload package zip
+      - name: Upload zip package artifact
         uses: actions/upload-artifact@v4
         with:
           name: 7zip-windows-x64-avx2-package-zip
-          path: dist/7zip-windows-x64-avx2.zip
+          path: artifacts/7zip-windows-x64-avx2.zip
           if-no-files-found: error
