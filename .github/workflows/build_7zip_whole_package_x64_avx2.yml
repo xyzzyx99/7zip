@@ -36,10 +36,17 @@ jobs:
           $text = $text -replace 'CFLAGS_O1\s*=\s*\$\(CFLAGS\)\s+-O1', "CFLAGS_O1 = $optFlags"
           $text = $text -replace 'CFLAGS_O2\s*=\s*\$\(CFLAGS\)\s+-O2', "CFLAGS_O2 = $optFlags"
 
-          # Add link-time optimization. /OPT:REF and /OPT:ICF are already present
-          # in Build.mak, but keeping them here makes the intended settings explicit.
-          $text += "`r`n# Added by GitHub Actions workflow: maximum optimization + AVX2`r`n"
-          $text += 'LFLAGS = $(LFLAGS) /LTCG /OPT:REF /OPT:ICF' + "`r`n"
+          # NMAKE expands the linker recipe when parsing Build.mak, so /LTCG
+          # must be set before the link rule, not appended to the end of the file.
+          $oldLinkFlags = 'LFLAGS = $(LFLAGS) -nologo -OPT:REF -OPT:ICF -INCREMENTAL:NO'
+          $newLinkFlags = 'LFLAGS = $(LFLAGS) -nologo /LTCG -OPT:REF -OPT:ICF -INCREMENTAL:NO'
+          if ($text.Contains($newLinkFlags)) {
+            Write-Host '/LTCG already present in the main linker flags.'
+          } elseif ($text.Contains($oldLinkFlags)) {
+            $text = $text.Replace($oldLinkFlags, $newLinkFlags)
+          } else {
+            throw 'Could not find the standard LFLAGS assignment in CPP\Build.mak'
+          }
 
           Set-Content -Path $buildMak -Value $text -NoNewline
 
